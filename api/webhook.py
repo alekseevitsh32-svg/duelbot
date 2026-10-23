@@ -7,37 +7,22 @@ import time
 from http.server import BaseHTTPRequestHandler
 
 from aiogram import Bot, Dispatcher
-from aiogram.filters import Command  # <-- Добавили импорт для команд
+from aiogram.filters import Command
 from aiogram.types import Message, Update, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramRetryAfter, TelegramAPIError
 
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-DUEL_TIMEOUT = 180 # 3 минуты (в секундах) на ожидание ответа
-CMD_COOLDOWN = 30  # 30 сек кд на команду в чате
-END_COOLDOWN = 180 # 3 минуты кд после окончания дуэли
+DUEL_TIMEOUT = 180 
+CMD_COOLDOWN = 30  
+END_COOLDOWN = 180 
 # ===================
 
-bot = Bot(token=BOT_TOKEN)
+# Диспетчер и память остаются глобальными
 dp = Dispatcher()
-
-# Память
 duels = {}             
 active_players = {}    
 chat_cooldowns = {}    
-
-async def safe_send(coro):
-    try:
-        await coro
-    except TelegramRetryAfter as e:
-        print(f"FLOOD WAIT: {e.retry_after}s")
-        await asyncio.sleep(e.retry_after + 0.5)
-        try: 
-            await coro
-        except Exception as e2:
-            print("RETRY FAILED:", repr(e2))
-    except Exception as e:
-        print("SEND ERROR:", repr(e))
 
 def end_duel(duel_id, chat_id):
     if duel_id in duels:
@@ -46,17 +31,6 @@ def end_duel(duel_id, chat_id):
         active_players.pop(duel['target'].lower(), None)
         del duels[duel_id]
     chat_cooldowns[chat_id] = time.time() + END_COOLDOWN
-
-async def check_timeouts():
-    now = time.time()
-    for duel_id, duel in list(duels.items()):
-        if duel.get('status') == 'pending' and (now - duel['created_at']) > DUEL_TIMEOUT:
-            text = f"@{duel['challenger']}! Ваш вызов на дуэль @{duel['target']} Не ответил"
-            try:
-                await bot.edit_message_text(chat_id=duel['chat_id'], message_id=duel['message_id'], text=text)
-            except Exception as e:
-                print("TIMEOUT EDIT ERROR:", repr(e))
-            end_duel(duel_id, duel['chat_id'])
 
 def check_player_status(username):
     username = username.lower()
@@ -68,22 +42,15 @@ def check_player_status(username):
         return True
     return False
 
-
-# ==== КОМАНДА START ====
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    # Отвечаем только в личных сообщениях (private)
     if message.chat.type == 'private':
-        await safe_send(message.answer("Я жив!"))
+        await message.answer("Я жив!")
 
-
-# ==== ОСНОВНОЙ ОБРАБОТЧИК ====
 @dp.message()
 async def handle_messages(message: Message):
     if not message.text:
         return
-
-    await check_timeouts()
     
     match = re.search(r"(?i)\bдуэль\s+@([a-zA-Z0-9_]+)", message.text)
     if not match:
@@ -94,30 +61,30 @@ async def handle_messages(message: Message):
 
     if now < chat_cooldowns.get(chat_id, 0):
         wait = int(chat_cooldowns[chat_id] - now)
-        await safe_send(message.reply(f"⏳ Подождите ещё {wait} сек. перед следующей дуэлью!"))
+        await message.reply(f"⏳ Подождите ещё {wait} сек. перед следующей дуэлью!")
         return
 
     target_username = match.group(1)
     challenger_username = message.from_user.username or message.from_user.first_name
 
     if target_username.lower() == challenger_username.lower():
-        await safe_send(message.reply("Нельзя вызвать на дуэль самого себя! 🤦‍♂️"))
+        await message.reply("Нельзя вызвать на дуэль самого себя! 🤦‍♂️")
         return
 
     try:
-        target_chat = await bot.get_chat(f"@{target_username}")
+        target_chat = await message.bot.get_chat(f"@{target_username}")
         if target_chat.is_bot:
-            await safe_send(message.reply("Нельзя вызывать бота на дуэль! 🤖"))
+            await message.reply("Нельзя вызывать бота на дуэль! 🤖")
             return
     except Exception:
         pass
 
     if check_player_status(target_username):
-        await safe_send(message.reply(f"@{challenger_username}! @{target_username} Уже играет дуэль!"))
+        await message.reply(f"@{challenger_username}! @{target_username} Уже играет дуэль!")
         return
     
     if check_player_status(challenger_username):
-        await safe_send(message.reply(f"@{challenger_username}! Вы уже участвуете в дуэли!"))
+        await message.reply(f"@{challenger_username}! Вы уже участвуете в дуэли!")
         return
 
     duel_id = str(uuid.uuid4())[:8]
@@ -156,14 +123,12 @@ async def handle_messages(message: Message):
 @dp.callback_query()
 async def handle_duel_buttons(callback: CallbackQuery):
     try:
-        await check_timeouts()
-
         data = callback.data.split(":")
         action = data[0]
         duel_id = data[1]
 
         if duel_id not in duels:
-            await callback.answer("Дуэль устарела (сервер Vercel перезагрузился). Начните новую!", show_alert=True)
+            await callback.answer("Дуэль устарела. Начните новую!", show_alert=True)
             return
 
         duel = duels[duel_id]
@@ -176,9 +141,7 @@ async def handle_duel_buttons(callback: CallbackQuery):
                 return
 
         if action == "ignore":
-            await safe_send(callback.message.edit_text(
-                f"@{duel['target']} Проигнорировал Дуэль От @{duel['challenger']}"
-            ))
+            await callback.message.edit_text(f"@{duel['target']} Проигнорировал Дуэль От @{duel['challenger']}")
             end_duel(duel_id, chat_id)
             await callback.answer()
             return
@@ -188,13 +151,19 @@ async def handle_duel_buttons(callback: CallbackQuery):
             active_players[duel['target'].lower()]['time'] = time.time()
             active_players[duel['challenger'].lower()]['time'] = time.time()
             
-            await update_turn_message(callback.message, duel_id, duel, prefix="Дуэль Готова!")
+            turn_user = duel['target']
+            acc = duel['t_acc']
+            text = f"Дуэль Готова!\n\nОчередь @{turn_user}.\nВыбирайте действие:\n(Шанс попадания: {acc}%)"
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Стрелять", callback_data=f"shoot:{duel_id}"),
+                InlineKeyboardButton(text="Прицелится получше", callback_data=f"aim:{duel_id}")
+            ]])
+            await callback.message.edit_text(text, reply_markup=kb)
             await callback.answer()
             return
 
         if action in ['shoot', 'aim']:
             expected_user = duel['target'] if duel['turn'] == 'T' else duel['challenger']
-            
             if user.lower() != expected_user.lower():
                 await callback.answer("Сейчас не ваш ход!", show_alert=True)
                 return
@@ -206,26 +175,37 @@ async def handle_duel_buttons(callback: CallbackQuery):
                     duel['c_acc'] = min(100, duel['c_acc'] + 20)
                 
                 duel['turn'] = 'C' if duel['turn'] == 'T' else 'T'
-                await update_turn_message(callback.message, duel_id, duel, prefix=f"🎯 @{user} прицелился получше! (+20% к шансу)")
+                turn_user = duel['target'] if duel['turn'] == 'T' else duel['challenger']
+                acc = duel['t_acc'] if duel['turn'] == 'T' else duel['c_acc']
+                
+                text = f"🎯 @{user} прицелился получше! (+20% к шансу)\n\nОчередь @{turn_user}.\nВыбирайте действие:\n(Шанс попадания: {acc}%)"
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Стрелять", callback_data=f"shoot:{duel_id}"),
+                    InlineKeyboardButton(text="Прицелится получше", callback_data=f"aim:{duel_id}")
+                ]])
+                await callback.message.edit_text(text, reply_markup=kb)
                 await callback.answer("Вы прицелились!")
                 return
 
             if action == "shoot":
                 chance = duel['t_acc'] if duel['turn'] == 'T' else duel['c_acc']
                 roll = random.randint(1, 100)
-
                 shooter = duel['target'] if duel['turn'] == 'T' else duel['challenger']
                 victim = duel['challenger'] if duel['turn'] == 'T' else duel['target']
 
                 if roll <= chance:
-                    await safe_send(callback.message.edit_text(
-                        f"🔫 БАХ! @{shooter} Убил @{victim}!"
-                    ))
+                    await callback.message.edit_text(f"🔫 БАХ! @{shooter} Убил @{victim}!")
                     end_duel(duel_id, chat_id)
                 else:
                     duel['turn'] = 'C' if duel['turn'] == 'T' else 'T'
-                    await update_turn_message(callback.message, duel_id, duel, prefix=f"💨 @{shooter} промахнулся! (Шанс был {chance}%)")
-                
+                    turn_user = duel['target'] if duel['turn'] == 'T' else duel['challenger']
+                    acc = duel['t_acc'] if duel['turn'] == 'T' else duel['c_acc']
+                    text = f"💨 @{shooter} промахнулся! (Шанс был {chance}%)\n\nОчередь @{turn_user}.\nВыбирайте действие:\n(Шанс попадания: {acc}%)"
+                    kb = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="Стрелять", callback_data=f"shoot:{duel_id}"),
+                        InlineKeyboardButton(text="Прицелится получше", callback_data=f"aim:{duel_id}")
+                    ]])
+                    await callback.message.edit_text(text, reply_markup=kb)
                 await callback.answer()
                 return
     except Exception as e:
@@ -237,36 +217,20 @@ async def handle_duel_buttons(callback: CallbackQuery):
             pass
 
 
-async def update_turn_message(message, duel_id, duel, prefix=""):
-    turn_user = duel['target'] if duel['turn'] == 'T' else duel['challenger']
-    acc = duel['t_acc'] if duel['turn'] == 'T' else duel['c_acc']
-
-    text = f"{prefix}\n\nОчередь @{turn_user}.\nВыбирайте действие:\n(Шанс попадания: {acc}%)"
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Стрелять", callback_data=f"shoot:{duel_id}"),
-            InlineKeyboardButton(text="Прицелится получше", callback_data=f"aim:{duel_id}")
-        ]
-    ])
-    await safe_send(message.edit_text(text, reply_markup=kb))
-
-
-# ==== СЕРВЕРLESS ОБЕРТКА ДЛЯ VERCEL ====
+# ==== ИСПРАВЛЕННАЯ ОБЕРТКА ДЛЯ VERCEL ====
 async def _async_process_update(update: Update):
-    await dp.feed_update(bot, update)
+    # Создаем нового бота для каждого запроса, чтобы не было ошибок "Event loop is closed"
+    bot = Bot(token=BOT_TOKEN)
+    try:
+        await dp.feed_update(bot, update)
+    finally:
+        # Обязательно закрываем сессию, чтобы Vercel мог спокойно уснуть
+        await bot.session.close()
 
 def _process_update(update: Update):
     try:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_async_process_update(update))
+        # Используем asyncio.run, так как он сам создает и корректно закрывает loop
+        asyncio.run(_async_process_update(update))
     except Exception as e:
         print("PROCESS ERROR:", repr(e))
 
